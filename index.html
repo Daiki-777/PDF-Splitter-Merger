@@ -149,7 +149,7 @@
                             </div>
                             <div class="ml-3 w-full overflow-hidden">
                                 <span class="block text-sm font-medium text-gray-900">ビジュアルで選択</span>
-                                <span class="block text-xs text-gray-500 mt-1">サムネイルを見ながら分割箇所をクリックして指定します</span>
+                                <span class="block text-xs text-gray-500 mt-1">サムネイルを見ながら分割箇所をクリックして指定します。不要なページはゴミ箱アイコンで除外できます。</span>
                                 <div id="visual-container" class="mt-4 transition-opacity duration-300">
                                     <div id="thumbnail-container" class="flex overflow-x-auto gap-10 py-6 px-4 bg-gray-200/50 rounded-lg border border-gray-300 min-h-[260px] items-center custom-scrollbar">
                                         <p class="text-sm text-gray-500 w-full text-center">プレビューを読み込み中...</p>
@@ -443,24 +443,39 @@
                     const cutBtns = document.querySelectorAll('.cut-btn.active');
                     const splitPoints = Array.from(cutBtns).map(btn => parseInt(btn.dataset.page, 10)).sort((a, b) => a - b);
                     
-                    if (splitPoints.length === 0) {
-                        showToast('分割ポイント（ハサミアイコン）が選択されていません。', 'error');
-                        hideLoading();
-                        return;
+                    const pageWrappers = document.querySelectorAll('#thumbnail-container > .group');
+                    
+                    let currentPartIndices = [];
+                    let partNum = 1;
+                    
+                    for (let i = 0; i < totalPages; i++) {
+                        const isExcluded = pageWrappers[i] && pageWrappers[i].dataset.excluded === 'true';
+                        
+                        if (!isExcluded) {
+                            currentPartIndices.push(i);
+                        }
+                        
+                        if (splitPoints.includes(i + 1) || i === totalPages - 1) {
+                            if (currentPartIndices.length > 0) {
+                                const partDoc = await PDFLib.PDFDocument.create();
+                                const pages = await partDoc.copyPages(srcDoc, currentPartIndices);
+                                pages.forEach(p => partDoc.addPage(p));
+                                
+                                const startPage = currentPartIndices[0] + 1;
+                                const endPage = currentPartIndices[currentPartIndices.length - 1] + 1;
+                                const fileNameInfo = startPage === endPage ? `${startPage}` : `${startPage}-${endPage}`;
+                                
+                                zip.file(`${originalName}_part${partNum}_(${fileNameInfo}).pdf`, await partDoc.save());
+                                partNum++;
+                                currentPartIndices = [];
+                            }
+                        }
                     }
 
-                    let startIdx = 0;
-                    for (let i = 0; i <= splitPoints.length; i++) {
-                        const endIdx = i < splitPoints.length ? splitPoints[i] : totalPages;
-                        const indices = Array.from({length: endIdx - startIdx}, (_, idx) => startIdx + idx);
-                        if (indices.length > 0) {
-                            const partDoc = await PDFLib.PDFDocument.create();
-                            const pages = await partDoc.copyPages(srcDoc, indices);
-                            pages.forEach(p => partDoc.addPage(p));
-                            const partNum = i + 1;
-                            zip.file(`${originalName}_part${partNum}_(${startIdx + 1}-${endIdx}).pdf`, await partDoc.save());
-                        }
-                        startIdx = endIdx;
+                    if (partNum === 1) {
+                        showToast('出力するページがありません。すべてのページが除外されています。', 'error');
+                        hideLoading();
+                        return;
                     }
                 } else if (mode === 'size') {
                     let partNum = 1;
@@ -538,14 +553,45 @@
                     
                     const pageWrapper = document.createElement('div');
                     pageWrapper.className = 'relative flex-shrink-0 flex flex-col items-center group';
+                    pageWrapper.dataset.excluded = 'false';
                     
+                    const canvasWrapper = document.createElement('div');
+                    canvasWrapper.className = 'relative border border-gray-200 bg-white transition-all duration-300';
+
                     const canvas = document.createElement('canvas');
-                    canvas.className = 'border border-gray-200 bg-white pointer-events-none';
+                    canvas.className = 'pointer-events-none';
                     canvas.height = viewport.height;
                     canvas.width = viewport.width;
                     
                     await page.render({canvasContext: canvas.getContext('2d'), viewport: viewport}).promise;
-                    pageWrapper.appendChild(canvas);
+                    
+                    canvasWrapper.appendChild(canvas);
+
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.className = 'absolute top-2 right-2 bg-white border border-gray-300 text-gray-500 hover:text-red-500 hover:border-red-500 rounded-full w-8 h-8 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all z-20 focus:outline-none shadow-sm';
+                    deleteBtn.innerHTML = '<span class="material-icons text-[18px]">delete_outline</span>';
+                    deleteBtn.title = "このページを除外する";
+                    
+                    deleteBtn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        const isExcluded = pageWrapper.dataset.excluded === 'true';
+                        if (isExcluded) {
+                            pageWrapper.dataset.excluded = 'false';
+                            canvasWrapper.classList.remove('opacity-40', 'grayscale');
+                            this.innerHTML = '<span class="material-icons text-[18px]">delete_outline</span>';
+                            this.className = 'absolute top-2 right-2 bg-white border border-gray-300 text-gray-500 hover:text-red-500 hover:border-red-500 rounded-full w-8 h-8 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all z-20 focus:outline-none shadow-sm';
+                            this.title = "このページを除外する";
+                        } else {
+                            pageWrapper.dataset.excluded = 'true';
+                            canvasWrapper.classList.add('opacity-40', 'grayscale');
+                            this.innerHTML = '<span class="material-icons text-[18px]">undo</span>';
+                            this.className = 'absolute top-2 right-2 bg-white border border-black text-black rounded-full w-8 h-8 flex items-center justify-center opacity-100 transition-all z-20 focus:outline-none shadow-sm hover:bg-gray-100';
+                            this.title = "ページを復元する";
+                        }
+                    });
+
+                    canvasWrapper.appendChild(deleteBtn);
+                    pageWrapper.appendChild(canvasWrapper);
                     
                     const pageNum = document.createElement('div');
                     pageNum.className = 'text-center text-xs text-gray-600 mt-2 font-medium';
