@@ -287,6 +287,11 @@
         // Merge State
         let mergeFiles = []; // { id, file, thumbnailCanvas, pageCount }
 
+        // Drag & Drop Auto Scroll State
+        let isDraggingMergeItem = false;
+        let dragMouseY = 0;
+        let autoScrollRaf = null;
+
         // --- DOM Elements ---
         // Tabs
         const tabSplit = document.getElementById('tab-split');
@@ -688,6 +693,32 @@
             showToast('すべてのページをクリアしました');
         });
 
+        // --- ドラッグ中のオートスクロール処理 ---
+        function autoScroll() {
+            if (!isDraggingMergeItem) return;
+            
+            const scrollThreshold = 100; // 画面上下端から100pxの範囲で反応
+            let scrollSpeed = 0;
+            
+            // 画面端に近づくほどスクロール速度を上げる（最大約25px/frame）
+            if (dragMouseY < scrollThreshold) {
+                scrollSpeed = -Math.max(5, (scrollThreshold - dragMouseY) * 0.25);
+                window.scrollBy(0, scrollSpeed);
+            } else if (window.innerHeight - dragMouseY < scrollThreshold) {
+                scrollSpeed = Math.max(5, (scrollThreshold - (window.innerHeight - dragMouseY)) * 0.25);
+                window.scrollBy(0, scrollSpeed);
+            }
+            
+            autoScrollRaf = requestAnimationFrame(autoScroll);
+        }
+
+        // マウス位置の追跡用
+        document.addEventListener('dragover', (e) => {
+            if (isDraggingMergeItem) {
+                dragMouseY = e.clientY;
+            }
+        });
+
         async function handleMergeFiles(files) {
             showLoading();
             let addedCount = 0;
@@ -804,11 +835,21 @@
 
                 // ドラッグ＆ドロップイベント
                 wrapper.addEventListener('dragstart', function(e) {
+                    isDraggingMergeItem = true;
+                    dragMouseY = e.clientY;
+                    if (!autoScrollRaf) autoScrollRaf = requestAnimationFrame(autoScroll);
+
                     e.dataTransfer.effectAllowed = 'move';
                     e.dataTransfer.setData('text/plain', index);
                     setTimeout(() => this.classList.add('opacity-40'), 0);
                 });
                 wrapper.addEventListener('dragend', function(e) {
+                    isDraggingMergeItem = false;
+                    if (autoScrollRaf) {
+                        cancelAnimationFrame(autoScrollRaf);
+                        autoScrollRaf = null;
+                    }
+
                     this.classList.remove('opacity-40');
                     document.querySelectorAll('.merge-item > div:nth-child(2)').forEach(el => {
                         el.classList.remove('border-black', 'border-dashed');
