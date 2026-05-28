@@ -10,8 +10,6 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <!-- PDF-lib -->
     <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
-    <!-- JSZip -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <!-- PDF.js for thumbnails -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
@@ -185,7 +183,7 @@
 
                     <button id="btn-process" class="w-full bg-black hover:bg-gray-800 text-white font-bold py-3 px-4 rounded-lg transition-colors flex justify-center items-center">
                         <span class="material-icons mr-2">file_download</span>
-                        分割してZIPダウンロード
+                        分割してダウンロード
                     </button>
                 </div>
             </div>
@@ -243,7 +241,7 @@
                             </div>
                             <div class="ml-3">
                                 <span class="block text-sm font-medium text-gray-900">1MB以下に分けて結合</span>
-                                <span class="block text-xs text-gray-500 mt-1">結合後の各ファイルサイズが1MB以内に収まるように自動で分割してZIPにします</span>
+                                <span class="block text-xs text-gray-500 mt-1">結合後の各ファイルサイズが1MB以内に収まるように自動で分けて保存します</span>
                             </div>
                         </label>
                     </div>
@@ -407,6 +405,10 @@
 
                 currentFile = file;
                 originalName = file.name.replace(/\.[^/.]+$/, "");
+                
+                // ★ 新しいファイルを読み込んだ際にサムネイル生成フラグを必ずリセットする
+                thumbnailsRendered = false; 
+                
                 document.getElementById('file-name').textContent = file.name;
                 document.getElementById('file-pages').textContent = `全 ${totalPages} ページ`;
                 
@@ -431,7 +433,7 @@
             showLoading();
 
             try {
-                const filesToZip = [];
+                const filesToDownload = [];
                 const arrayBuffer = await currentFile.arrayBuffer();
                 const srcDoc = await PDFLib.PDFDocument.load(arrayBuffer);
 
@@ -442,7 +444,7 @@
                         newDoc.addPage(copiedPage);
                         const newPdfBytes = await newDoc.save();
                         const pageNum = String(i + 1).padStart(String(totalPages).length, '0');
-                        filesToZip.push({ name: `${originalName}_page_${pageNum}.pdf`, data: newPdfBytes });
+                        filesToDownload.push({ name: `${originalName}_page_${pageNum}.pdf`, data: newPdfBytes });
                     }
                 } else if (mode === 'visual') {
                     const cutBtns = document.querySelectorAll('.cut-btn.active');
@@ -470,7 +472,7 @@
                                 const endPage = currentPartIndices[currentPartIndices.length - 1] + 1;
                                 const fileNameInfo = startPage === endPage ? `${startPage}` : `${startPage}-${endPage}`;
                                 
-                                filesToZip.push({ name: `${originalName}_part${partNum}_(${fileNameInfo}).pdf`, data: await partDoc.save() });
+                                filesToDownload.push({ name: `${originalName}_part${partNum}_(${fileNameInfo}).pdf`, data: await partDoc.save() });
                                 partNum++;
                                 currentPartIndices = [];
                             }
@@ -515,7 +517,7 @@
                         }
 
                         const actualEndIndex = endIndex - 1;
-                        filesToZip.push({ name: `${originalName}_part${partNum}_(${startIndex + 1}-${actualEndIndex + 1}).pdf`, data: lastValidBytes });
+                        filesToDownload.push({ name: `${originalName}_part${partNum}_(${startIndex + 1}-${actualEndIndex + 1}).pdf`, data: lastValidBytes });
                         partNum++;
                         startIndex = endIndex;
                     }
@@ -526,7 +528,7 @@
                     }
                 }
 
-                const success = await downloadZipWithFolder(filesToZip, `${originalName}_split.zip`);
+                const success = await downloadMultipleFiles(filesToDownload);
                 if (success) {
                     showToast('保存が完了しました', 'success');
                 }
@@ -681,7 +683,7 @@
                 if (e.target.value === 'single') {
                     btn.innerHTML = '<span class="material-icons mr-2">merge_type</span>1つに結合してダウンロード';
                 } else {
-                    btn.innerHTML = '<span class="material-icons mr-2">folder_zip</span>1MB以下で結合してZIPダウンロード';
+                    btn.innerHTML = '<span class="material-icons mr-2">folder_copy</span>1MB以下で分けてダウンロード';
                 }
             });
         });
@@ -924,7 +926,7 @@
                     if (success) showToast('保存が完了しました', 'success');
                     
                 } else if (mode === 'size') {
-                    const filesToZip = [];
+                    const filesToDownload = [];
                     const MAX_BYTES = 1024 * 1024; // 1MB制限
                     let partNum = 1;
                     let startIndex = 0;
@@ -960,12 +962,12 @@
                         }
 
                         const actualEndIndex = endIndex - 1;
-                        filesToZip.push({ name: `${baseName}_merged_part${partNum}.pdf`, data: lastValidBytes });
+                        filesToDownload.push({ name: `${baseName}_merged_part${partNum}.pdf`, data: lastValidBytes });
                         partNum++;
                         startIndex = endIndex;
                     }
 
-                    const success = await downloadZipWithFolder(filesToZip, `${baseName}_merged.zip`);
+                    const success = await downloadMultipleFiles(filesToDownload);
 
                     if (hasExceededPage) {
                         setTimeout(() => showToast('1ページ単独で1MBを超える部分はそのまま出力されました', 'error'), 3500);
@@ -1025,65 +1027,50 @@
             return true;
         }
 
-        async function downloadZipWithFolder(filesToZip, defaultFilename) {
-            let finalFilename = defaultFilename;
-            let fileHandle = null;
+        async function downloadMultipleFiles(filesToDownload) {
             const isTopWindow = window === window.parent;
 
-            // 1. 先に保存ダイアログを開いてファイル名（ZIP名）を決定する
-            if (window.showSaveFilePicker && isTopWindow) {
+            // 1. フォルダ選択ダイアログを開いて保存先を決定する（Chrome/Edge等）
+            if (window.showDirectoryPicker && isTopWindow) {
                 try {
-                    const options = {
-                        suggestedName: defaultFilename,
-                        types: [{
-                            description: 'ZIPファイル',
-                            accept: { 'application/zip': ['.zip'] },
-                        }],
-                    };
-                    fileHandle = await window.showSaveFilePicker(options);
-                    finalFilename = fileHandle.name;
-                } catch (err) {
-                    if (err.name === 'AbortError') return false; // キャンセル時
-                }
-            }
-
-            // 2. 決定したファイル名から拡張子(.zip)を除いてフォルダ名にする
-            const folderName = finalFilename.replace(/\.zip$/i, '');
-            const zip = new JSZip();
-            const folder = zip.folder(folderName);
-
-            // 3. フォルダの中にPDFファイルを追加
-            for (const file of filesToZip) {
-                folder.file(file.name, file.data);
-            }
-
-            // 4. ZIPを生成して書き込む
-            const zipBlob = await zip.generateAsync({ type: 'blob' });
-
-            if (fileHandle) {
-                try {
-                    const writable = await fileHandle.createWritable();
-                    await writable.write(zipBlob);
-                    await writable.close();
+                    const dirHandle = await window.showDirectoryPicker();
+                    for (const file of filesToDownload) {
+                        const fileHandle = await dirHandle.getFileHandle(file.name, { create: true });
+                        const writable = await fileHandle.createWritable();
+                        await writable.write(file.data);
+                        await writable.close();
+                    }
                     return true;
                 } catch (err) {
-                    console.error('File write error:', err);
-                    return false;
+                    if (err.name === 'AbortError') return false; // キャンセル時
+                    console.error('Directory picker error:', err);
+                    // エラー時は下のフォールバックへ進む
                 }
-            } else {
-                // フォールバック（ダイアログ非対応環境）
-                const url = URL.createObjectURL(zipBlob);
+            }
+
+            // 2. フォールバック（ダイアログ非対応環境、またはプレビュー画面などのiframe環境）
+            // 複数のPDFを連続してブラウザにダウンロードさせる
+            for (let i = 0; i < filesToDownload.length; i++) {
+                const file = filesToDownload[i];
+                const blob = new Blob([file.data], { type: 'application/pdf' });
+                const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = finalFilename;
+                a.download = file.name;
                 document.body.appendChild(a);
                 a.click();
+                
                 setTimeout(() => {
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
-                }, 0);
-                return true;
+                }, 100);
+
+                // ブラウザが連続ダウンロードをブロックしないように少し待機する
+                if (i < filesToDownload.length - 1) {
+                    await new Promise(r => setTimeout(r, 500));
+                }
             }
+            return true;
         }
 
         function showLoading() {
