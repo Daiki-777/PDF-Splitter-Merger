@@ -213,8 +213,7 @@
                     <div class="flex flex-col sm:flex-row justify-between items-start sm:items-end border-b pb-2 mb-2 gap-2">
                         <h3 class="text-lg font-medium text-gray-700">結合する順序の整理</h3>
                         <div class="flex gap-4">
-                            <!-- スマート整理ボタンを追加 -->
-                            <button id="btn-merge-smart-sort" class="text-sm text-blue-600 hover:text-blue-800 flex items-center transition-colors focus:outline-none font-bold bg-blue-50 px-2 py-1 rounded border border-blue-200" title="PDF内の文字を解析して、送付状→実績→モニタリングの順（名簿順）に自動整理します">
+                            <button id="btn-merge-smart-sort" class="text-sm text-blue-600 hover:text-blue-800 flex items-center transition-colors focus:outline-none font-bold bg-blue-50 px-2 py-1 rounded border border-blue-200" title="PDF内の文字を解析して、送付状→実績→モニタリングの順に自動整理します">
                                 <span class="material-icons text-[18px] mr-1 text-blue-500">auto_awesome</span>
                                 スマート自動整理
                             </button>
@@ -281,7 +280,7 @@
 
     <script>
         // --- Global State ---
-        let currentMode = 'split'; // 'split' or 'merge'
+        let currentMode = 'split'; 
 
         // Split State
         let currentFile = null;
@@ -290,8 +289,8 @@
         let thumbnailsRendered = false;
 
         // Merge State
-        let mergeFiles = []; // { id, file, thumbnailCanvas, pageCount, docType, userName }
-        let pdfjsLoadedDocs = {}; // テキスト解析用のPDFドキュメントキャッシュ
+        let mergeFiles = []; 
+        let pdfjsLoadedDocs = {}; 
 
         // Drag & Drop Auto Scroll State
         let isDraggingMergeItem = false;
@@ -299,25 +298,22 @@
         let autoScrollRaf = null;
 
         // --- DOM Elements ---
-        // Tabs
         const tabSplit = document.getElementById('tab-split');
         const tabMerge = document.getElementById('tab-merge');
         const splitView = document.getElementById('split-view');
         const mergeView = document.getElementById('merge-view');
 
-        // Split Elements
         const dropZone = document.getElementById('drop-zone');
         const fileInput = document.getElementById('file-input');
         const settingsCard = document.getElementById('settings-card');
         const radios = document.getElementsByName('split-mode');
 
-        // Merge Elements
         const mergeDropZone = document.getElementById('merge-drop-zone');
         const mergeFileInput = document.getElementById('merge-file-input');
         const btnMergeAdd = document.getElementById('btn-merge-add');
         const btnProcessMerge = document.getElementById('btn-process-merge');
         const btnMergeClear = document.getElementById('btn-merge-clear');
-        const btnMergeSmartSort = document.getElementById('btn-merge-smart-sort'); // スマート整理ボタン
+        const btnMergeSmartSort = document.getElementById('btn-merge-smart-sort'); 
 
         // --- Tab Logic ---
         tabSplit.addEventListener('click', () => {
@@ -351,7 +347,6 @@
                 setTimeout(() => mergeView.classList.remove('opacity-0'), 10);
             }, 300);
         });
-
 
         // --- Split Logic ---
         dropZone.addEventListener('click', () => fileInput.click());
@@ -699,7 +694,7 @@
         btnMergeClear.addEventListener('click', () => {
             if (mergeFiles.length === 0) return;
             mergeFiles = [];
-            pdfjsLoadedDocs = {}; // キャッシュもクリア
+            pdfjsLoadedDocs = {}; 
             renderMergeThumbnails();
             showToast('すべてのページをクリアしました');
         });
@@ -719,52 +714,97 @@
                         
                         const page = await pdfDoc.getPage(item.pageNumber);
                         const textContent = await page.getTextContent();
-                        // ページ内のテキストを繋げる
-                        const text = textContent.items.map(t => t.str).join(''); 
+                        const rawText = textContent.items.map(t => t.str).join(''); 
+                        // 空白を全て除去して判定しやすくする
+                        const fullText = rawText.replace(/\s/g, ''); 
+                        item.fullText = fullText;
                         
-                        if (text.includes('送付状') || text.includes('書類送付')) {
+                        if (fullText.includes('送付状') || fullText.includes('書類送付')) {
                             item.docType = 'cover';
-                        } else if (text.includes('モニタリング表')) {
+                        } else if (fullText.includes('モニタリング表') || fullText.includes('モニタリング結果')) {
                             item.docType = 'monitoring';
-                            // 「利用者名 〇〇 様」の形式から名前を抽出
-                            const match = text.match(/利用者名\s*(.+?)\s*様/);
-                            if (match) item.userName = match[1].replace(/\s/g, ''); // 空白除去
-                        } else if (text.includes('サービス提供票')) {
+                            // 空白がない状態でのマッチング
+                            const match = fullText.match(/利用者名(.*?)様/);
+                            if (match && match[1] && match[1].length < 15) {
+                                item.userName = match[1]; 
+                            }
+                        } else if (fullText.includes('サービス提供票') || fullText.includes('提供票')) {
                             item.docType = 'record';
-                            item.fullText = text.replace(/\s/g, ''); // 後で検索できるように保存
                         } else {
                             item.docType = 'unknown';
-                            item.fullText = text.replace(/\s/g, '');
                         }
                     }
                 }
                 
-                // 2. モニタリング表から抽出した「名前リスト」を作成
-                const userNames = [...new Set(mergeFiles.filter(i => i.docType === 'monitoring' && i.userName).map(i => i.userName))];
-                
-                // 3. 実績ファイルなどのテキストから、誰のものかを特定して紐づける
+                let userNames = [];
                 for (let item of mergeFiles) {
-                    if (item.docType === 'record' && !item.userName) {
-                        let found = false;
-                        for (let name of userNames) {
+                    if (item.userName && !userNames.includes(item.userName)) {
+                        userNames.push(item.userName);
+                    }
+                }
+                
+                // 2. 実績ファイルなどのファイル名から、名前を推測して紐づける
+                for (let item of mergeFiles) {
+                    if (item.docType === 'record' || item.docType === 'unknown') {
+                        const fileNameBase = item.fileName.replace(/\.[^/.]+$/, "").replace(/\s/g, '');
+                        if (fileNameBase.length > 0 && fileNameBase !== 'm' && !fileNameBase.includes('モニタ') && !fileNameBase.includes('送付')) {
+                             if (!item.userName) item.userName = fileNameBase;
+                             if (!userNames.includes(fileNameBase)) userNames.push(fileNameBase);
+                        }
+                    }
+                }
+
+                // 3. テキストから名前が含まれているか相互チェック（モニタリングの抽出漏れ対策）
+                for (let item of mergeFiles) {
+                    if (!item.userName && item.fullText) {
+                        const sortedNames = [...userNames].sort((a, b) => b.length - a.length);
+                        for (let name of sortedNames) {
                             if (item.fullText.includes(name)) {
                                 item.userName = name;
-                                found = true;
                                 break;
-                            }
-                        }
-                        // テキストから見つからなかった場合は、ファイル名（例: 阿部.pdf）から名前を推測
-                        if (!found) {
-                            const fileNameBase = item.fileName.replace(/\.[^/.]+$/, "").replace(/\s/g, '');
-                            if (fileNameBase.length > 0 && fileNameBase !== 'm' && fileNameBase !== 'モニタリング') {
-                                 item.userName = fileNameBase;
-                                 if (!userNames.includes(fileNameBase)) userNames.push(fileNameBase);
                             }
                         }
                     }
                 }
 
-                // 4. 並べ替え処理の準備
+                // 4. 【強化ロジック】実績ファイル（複数ページ）の場合、名前をファイル内で共有する
+                const fileIdToName = {};
+                const fileIdToDocType = {};
+                for (let item of mergeFiles) {
+                    if (item.docType !== 'monitoring' && item.docType !== 'cover') {
+                        if (item.userName) fileIdToName[item.fileId] = item.userName;
+                        if (item.docType === 'record') fileIdToDocType[item.fileId] = 'record';
+                    }
+                }
+                for (let item of mergeFiles) {
+                    if (item.docType !== 'monitoring' && item.docType !== 'cover') {
+                        if (!item.userName && fileIdToName[item.fileId]) {
+                            item.userName = fileIdToName[item.fileId];
+                        }
+                        if (item.docType === 'unknown' && fileIdToDocType[item.fileId] === 'record') {
+                            item.docType = 'record';
+                        }
+                    }
+                }
+
+                // 5. 【名寄せロジック】 「阿部」と「阿部麗子」が別々に認識されるのを防ぎ、統一する
+                const uniqueNames = [...new Set(mergeFiles.map(i => i.userName).filter(Boolean))];
+                const nameMapping = {};
+                for (let i = 0; i < uniqueNames.length; i++) {
+                    for (let j = 0; j < uniqueNames.length; j++) {
+                        if (i !== j && uniqueNames[i].includes(uniqueNames[j])) {
+                            // 例: "阿部麗子" は "阿部" を含む -> "阿部麗子" を "阿部" に統一する
+                            nameMapping[uniqueNames[i]] = uniqueNames[j];
+                        }
+                    }
+                }
+                for (let item of mergeFiles) {
+                    if (item.userName && nameMapping[item.userName]) {
+                        item.userName = nameMapping[item.userName];
+                    }
+                }
+
+                // 6. 並べ替え処理の準備
                 const covers = mergeFiles.filter(i => i.docType === 'cover');
                 const unknowns = mergeFiles.filter(i => i.docType === 'unknown' || (i.docType !== 'cover' && !i.userName));
                 
@@ -777,22 +817,19 @@
                     }
                 }
 
-                // 名前をあいうえお順（日本語ロケール）でソート
+                // 苗字でソート (ひらがな・漢字のコード順)
                 const sortedNames = Object.keys(userGroups).sort((a, b) => a.localeCompare(b, 'ja'));
 
-                // 5. 結合順序の配列を作成
+                // 7. 結合順序の配列を作成
                 const sortedFiles = [];
                 
-                // ルール1: 送付状を先頭に
                 covers.sort((a,b) => (a.fileId === b.fileId) ? a.pageIndex - b.pageIndex : 0);
                 sortedFiles.push(...covers);
 
-                // ルール2: 名簿順に「実績」→「モニタリング」の順で並べる
                 for (let name of sortedNames) {
                     const records = userGroups[name].records;
                     const monitorings = userGroups[name].monitorings;
                     
-                    // 同じファイル内のページ順を維持
                     records.sort((a,b) => (a.fileId === b.fileId) ? a.pageIndex - b.pageIndex : 0);
                     monitorings.sort((a,b) => (a.fileId === b.fileId) ? a.pageIndex - b.pageIndex : 0);
                     
@@ -800,11 +837,10 @@
                     sortedFiles.push(...monitorings);
                 }
                 
-                // 判別不能なものは最後に置く
                 unknowns.sort((a,b) => (a.fileId === b.fileId) ? a.pageIndex - b.pageIndex : 0);
                 sortedFiles.push(...unknowns);
 
-                // 6. 結果を反映
+                // 8. 結果を反映
                 mergeFiles = sortedFiles;
                 renderMergeThumbnails();
                 showToast('スマート整理が完了しました', 'success');
@@ -816,7 +852,6 @@
                 hideLoading();
             }
         });
-
 
         // --- ドラッグ中のオートスクロール処理 ---
         function autoScroll() {
@@ -855,7 +890,6 @@
                     const loadingTask = pdfjsLib.getDocument({data: arrayBuffer});
                     const pdfDocumentObj = await loadingTask.promise;
                     
-                    // 解析用にドキュメントをキャッシュに保存（追加）
                     pdfjsLoadedDocs[fileId] = pdfDocumentObj;
                     
                     for (let p = 1; p <= pdfDocumentObj.numPages; p++) {
@@ -880,8 +914,8 @@
                             pageIndex: p - 1,
                             pageNumber: p,
                             thumbnailCanvas: canvas,
-                            docType: null, // 後で解析
-                            userName: null // 後で解析
+                            docType: null, 
+                            userName: null 
                         });
                         addedCount++;
                     }
@@ -927,7 +961,6 @@
                 wrapper.draggable = true;
                 wrapper.dataset.index = index;
 
-                // 結合順の番号
                 const orderBadge = document.createElement('div');
                 orderBadge.className = 'absolute -top-3 -left-3 bg-black text-white font-bold rounded-full w-8 h-8 flex items-center justify-center z-20 border border-white text-sm';
                 orderBadge.textContent = index + 1;
@@ -938,7 +971,6 @@
                 canvasWrapper.appendChild(item.thumbnailCanvas);
                 wrapper.appendChild(canvasWrapper);
                 
-                // ★ 新機能：判別された種類を示すバッジ
                 if (item.docType) {
                     const typeBadge = document.createElement('div');
                     typeBadge.className = 'absolute bottom-0 left-0 text-[10px] px-1.5 py-0.5 rounded-tr pointer-events-none z-10 font-bold';
@@ -958,18 +990,16 @@
                     canvasWrapper.appendChild(typeBadge);
                 }
 
-                // 元ファイルでのページ番号
                 const badge = document.createElement('div');
                 badge.className = 'absolute bottom-0 right-0 bg-black text-white text-[10px] px-1.5 py-0.5 pointer-events-none z-10';
                 badge.textContent = `元 p.${item.pageNumber}`;
                 canvasWrapper.appendChild(badge);
 
-                // ★ 新機能：判別された氏名を含めたタイトル表示
                 const title = document.createElement('div');
                 title.className = 'text-center text-xs text-gray-700 mt-2 font-medium w-full px-1 line-clamp-2 break-words';
                 let titleText = item.fileName;
                 if (item.userName && item.docType !== 'cover') {
-                    titleText = `【${item.userName}様】${titleText}`; // 名前を付けてわかりやすく
+                    titleText = `【${item.userName}様】${titleText}`; 
                 }
                 title.textContent = titleText;
                 title.title = `${titleText} (元の${item.pageNumber}ページ目)`;
@@ -985,7 +1015,6 @@
                 };
                 wrapper.appendChild(removeBtn);
 
-                // ドラッグ＆ドロップイベント
                 wrapper.addEventListener('dragstart', function(e) {
                     isDraggingMergeItem = true;
                     dragMouseY = e.clientY;
@@ -1050,7 +1079,7 @@
             showLoading();
             try {
                 const mode = document.querySelector('input[name="merge-mode"]:checked').value;
-                const loadedPdfsForMerge = {}; // 保存処理用キャッシュ
+                const loadedPdfsForMerge = {}; 
 
                 for (let item of mergeFiles) {
                     if (!loadedPdfsForMerge[item.fileId]) {
@@ -1076,7 +1105,7 @@
                     
                 } else if (mode === 'size') {
                     const filesToDownload = [];
-                    const MAX_BYTES = 1024 * 1024; // 1MB制限
+                    const MAX_BYTES = 1024 * 1024; 
                     let partNum = 1;
                     let startIndex = 0;
                     let hasExceededPage = false;
@@ -1087,7 +1116,6 @@
 
                         while (endIndex < mergeFiles.length) {
                             const testDoc = await PDFLib.PDFDocument.create();
-                            // startIndex から endIndex までのページを追加
                             for (let i = startIndex; i <= endIndex; i++) {
                                 const item = mergeFiles[i];
                                 const pdfDoc = loadedPdfsForMerge[item.fileId];
@@ -1178,7 +1206,6 @@
         async function downloadMultipleFiles(filesToDownload) {
             const isTopWindow = window === window.parent;
 
-            // 1. フォルダ選択ダイアログを開いて保存先を決定する（Chrome/Edge等）
             if (window.showDirectoryPicker && isTopWindow) {
                 try {
                     const dirHandle = await window.showDirectoryPicker();
@@ -1195,7 +1222,6 @@
                 }
             }
 
-            // 2. フォールバック（ダイアログ非対応環境等）
             for (let i = 0; i < filesToDownload.length; i++) {
                 const file = filesToDownload[i];
                 const blob = new Blob([file.data], { type: 'application/pdf' });
