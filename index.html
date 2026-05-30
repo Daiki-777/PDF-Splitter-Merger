@@ -1080,6 +1080,17 @@
         }
 
         // ==========================================
+        // ★ ファイルサイズ最適化
+        // ==========================================
+        async function optimizePdfSize(sourcePdfDoc) {
+            const newDoc = await PDFLib.PDFDocument.create();
+            const pageIndices = sourcePdfDoc.getPageIndices();
+            const copiedPages = await newDoc.copyPages(sourcePdfDoc, pageIndices);
+            copiedPages.forEach(p => newDoc.addPage(p));
+            return await newDoc.save({ useObjectStreams: false });
+        }
+
+        // ==========================================
         // ★ ファイル名を尋ねるカスタムダイアログ機能
         // ==========================================
         function askFileName(defaultName) {
@@ -1110,10 +1121,13 @@
 
                 const onCancel = () => {
                     cleanup();
-                    resolve(null); // キャンセル時はnullを返す
+                    resolve(null); 
                 };
 
                 const onKey = (e) => {
+                    // ★ IME入力中（文字の変換中など）のエンターキーは無視する
+                    if (e.isComposing) return;
+                    
                     if (e.key === 'Enter') onOk();
                     if (e.key === 'Escape') onCancel();
                 };
@@ -1155,8 +1169,6 @@
                 if (mode === 'single') {
                     const mergedPdf = await PDFLib.PDFDocument.create();
                     
-                    // 【究極の肥大化防止ロジック】
-                    // 各元のPDFファイルから、必要なページだけを「1回だけ」まとめて抽出する
                     const pagesToCopyByFileId = {};
                     mergeFiles.forEach(item => {
                         if (!pagesToCopyByFileId[item.fileId]) {
@@ -1178,7 +1190,6 @@
                         });
                     }
 
-                    // 抽出したページを、画面上で整理した順番通りに並べる
                     for (let item of mergeFiles) {
                         const page = copiedPagesMap[`${item.fileId}_${item.pageIndex}`];
                         mergedPdf.addPage(page);
@@ -1203,7 +1214,6 @@
                         while (endIndex < mergeFiles.length) {
                             const testDoc = await PDFLib.PDFDocument.create();
                             
-                            // 同様に、分割するブロック内でも「1ファイルにつき1回の抽出」を行う
                             const pagesToCopyByFileId = {};
                             for (let i = startIndex; i <= endIndex; i++) {
                                 const item = mergeFiles[i];
