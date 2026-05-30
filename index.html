@@ -448,7 +448,7 @@
                         const newDoc = await PDFLib.PDFDocument.create();
                         const [copiedPage] = await newDoc.copyPages(srcDoc, [i]);
                         newDoc.addPage(copiedPage);
-                        const newPdfBytes = await optimizePdfSize(newDoc);
+                        const newPdfBytes = await newDoc.save();
                         const pageNum = String(i + 1).padStart(String(totalPages).length, '0');
                         filesToDownload.push({ name: `${originalName}_page_${pageNum}.pdf`, data: newPdfBytes });
                     }
@@ -478,8 +478,7 @@
                                 const endPage = currentPartIndices[currentPartIndices.length - 1] + 1;
                                 const fileNameInfo = startPage === endPage ? `${startPage}` : `${startPage}-${endPage}`;
                                 
-                                const optimizedBytes = await optimizePdfSize(partDoc);
-                                filesToDownload.push({ name: `${originalName}_part${partNum}_(${fileNameInfo}).pdf`, data: optimizedBytes });
+                                filesToDownload.push({ name: `${originalName}_part${partNum}_(${fileNameInfo}).pdf`, data: await partDoc.save() });
                                 partNum++;
                                 currentPartIndices = [];
                             }
@@ -507,7 +506,7 @@
                             const copiedPages = await testDoc.copyPages(srcDoc, indices);
                             copiedPages.forEach(p => testDoc.addPage(p));
                             
-                            const testBytes = await optimizePdfSize(testDoc);
+                            const testBytes = await testDoc.save();
 
                             if (testBytes.length <= MAX_BYTES) {
                                 lastValidBytes = testBytes;
@@ -702,7 +701,7 @@
         });
 
         // ----------------------------------------------------
-        // ★ 新機能：スマート自動整理（種類判定＆氏名ソート）
+        // ★ スマート自動整理（種類判定＆氏名ソート）
         // ----------------------------------------------------
         btnMergeSmartSort.addEventListener('click', async () => {
             if (mergeFiles.length === 0) return;
@@ -1062,19 +1061,9 @@
             });
         }
 
-        // ==========================================
-        // ★ 新機能：ファイルサイズの最適化関数
-        // ==========================================
-        async function optimizePdfSize(sourcePdfDoc) {
-            // 新しい空のドキュメントを作成し、そこにコピーすることで不要なメタデータや重複リソースを削ぎ落とす
-            const newDoc = await PDFLib.PDFDocument.create();
-            const pageIndices = sourcePdfDoc.getPageIndices();
-            const copiedPages = await newDoc.copyPages(sourcePdfDoc, pageIndices);
-            copiedPages.forEach(p => newDoc.addPage(p));
-            // 保存時のオプションを設定（デフォルトのままでも十分最適化されることが多い）
-            return await newDoc.save({ useObjectStreams: false });
-        }
-
+        // ----------------------------------------------------
+        // ★ 結合実行（ファイル肥大化防止のチャンク処理版）
+        // ----------------------------------------------------
         btnProcessMerge.addEventListener('click', async () => {
             if (mergeFiles.length < 2) {
                 showToast('結合するには2ページ以上必要です。', 'error');
@@ -1096,15 +1085,27 @@
 
                 if (mode === 'single') {
                     const mergedPdf = await PDFLib.PDFDocument.create();
-                    for (let item of mergeFiles) {
-                        const pdfDoc = loadedPdfsForMerge[item.fileId];
-                        const [copiedPage] = await mergedPdf.copyPages(pdfDoc, [item.pageIndex]);
-                        mergedPdf.addPage(copiedPage);
+                    
+                    // 同じファイルから連続してページを追加する場合は、まとめてコピーしてリソースの重複を防ぐ（チャンク処理）
+                    let i = 0;
+                    while (i < mergeFiles.length) {
+                        const currentFileId = mergeFiles[i].fileId;
+                        const pdfDoc = loadedPdfsForMerge[currentFileId];
+                        const indicesToCopy = [];
+                        
+                        let j = i;
+                        while (j < mergeFiles.length && mergeFiles[j].fileId === currentFileId) {
+                            indicesToCopy.push(mergeFiles[j].pageIndex);
+                            j++;
+                        }
+                        
+                        const copiedPages = await mergedPdf.copyPages(pdfDoc, indicesToCopy);
+                        copiedPages.forEach(p => mergedPdf.addPage(p));
+                        i = j;
                     }
                     
-                    // ★ 結合後に最適化処理を通す
-                    const optimizedBytes = await optimizePdfSize(mergedPdf);
-                    const blob = new Blob([optimizedBytes], { type: 'application/pdf' });
+                    const mergedPdfBytes = await mergedPdf.save();
+                    const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
                     const success = await downloadSingleFile(blob, `${baseName}_merged.pdf`);
                     if (success) showToast('保存が完了しました', 'success');
                     
@@ -1121,15 +1122,26 @@
 
                         while (endIndex < mergeFiles.length) {
                             const testDoc = await PDFLib.PDFDocument.create();
-                            for (let i = startIndex; i <= endIndex; i++) {
-                                const item = mergeFiles[i];
-                                const pdfDoc = loadedPdfsForMerge[item.fileId];
-                                const [copiedPage] = await testDoc.copyPages(pdfDoc, [item.pageIndex]);
-                                testDoc.addPage(copiedPage);
+                            
+                            // チャンク処理で一括コピー
+                            let i = startIndex;
+                            while (i <= endIndex) {
+                                const currentFileId = mergeFiles[i].fileId;
+                                const pdfDoc = loadedPdfsForMerge[currentFileId];
+                                const indicesToCopy = [];
+                                
+                                let j = i;
+                                while (j <= endIndex && mergeFiles[j].fileId === currentFileId) {
+                                    indicesToCopy.push(mergeFiles[j].pageIndex);
+                                    j++;
+                                }
+                                
+                                const copiedPages = await testDoc.copyPages(pdfDoc, indicesToCopy);
+                                copiedPages.forEach(p => testDoc.addPage(p));
+                                i = j;
                             }
                             
-                            // ★ 1MB判定時にも最適化後のサイズでチェックする
-                            const testBytes = await optimizePdfSize(testDoc);
+                            const testBytes = await testDoc.save();
 
                             if (testBytes.length <= MAX_BYTES) {
                                 lastValidBytes = testBytes;
