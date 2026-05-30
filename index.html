@@ -450,9 +450,8 @@
             if (!currentFile) return;
             const mode = document.querySelector('input[name="split-mode"]:checked').value;
             
-            // ★ ファイル名を尋ねるダイアログを表示
             const baseFileName = await askFileName(originalName);
-            if (!baseFileName) return; // キャンセルされた場合は処理を中止
+            if (!baseFileName) return; 
 
             showLoading();
 
@@ -466,7 +465,7 @@
                         const newDoc = await PDFLib.PDFDocument.create();
                         const [copiedPage] = await newDoc.copyPages(srcDoc, [i]);
                         newDoc.addPage(copiedPage);
-                        const newPdfBytes = await optimizePdfSize(newDoc);
+                        const newPdfBytes = await newDoc.save();
                         const pageNum = String(i + 1).padStart(String(totalPages).length, '0');
                         filesToDownload.push({ name: `${baseFileName}_page_${pageNum}.pdf`, data: newPdfBytes });
                     }
@@ -496,7 +495,7 @@
                                 const endPage = currentPartIndices[currentPartIndices.length - 1] + 1;
                                 const fileNameInfo = startPage === endPage ? `${startPage}` : `${startPage}-${endPage}`;
                                 
-                                const optimizedBytes = await optimizePdfSize(partDoc);
+                                const optimizedBytes = await partDoc.save();
                                 filesToDownload.push({ name: `${baseFileName}_part${partNum}_(${fileNameInfo}).pdf`, data: optimizedBytes });
                                 partNum++;
                                 currentPartIndices = [];
@@ -513,7 +512,7 @@
                     let partNum = 1;
                     let startIndex = 0;
                     let hasExceededPage = false;
-                    const MAX_BYTES = 1024 * 1024; // 1MB制限
+                    const MAX_BYTES = 1024 * 1024; 
 
                     while (startIndex < totalPages) {
                         let endIndex = startIndex;
@@ -525,7 +524,7 @@
                             const copiedPages = await testDoc.copyPages(srcDoc, indices);
                             copiedPages.forEach(p => testDoc.addPage(p));
                             
-                            const testBytes = await optimizePdfSize(testDoc);
+                            const testBytes = await testDoc.save();
 
                             if (testBytes.length <= MAX_BYTES) {
                                 lastValidBytes = testBytes;
@@ -1081,17 +1080,6 @@
         }
 
         // ==========================================
-        // ★ ファイルサイズの最適化関数
-        // ==========================================
-        async function optimizePdfSize(sourcePdfDoc) {
-            const newDoc = await PDFLib.PDFDocument.create();
-            const pageIndices = sourcePdfDoc.getPageIndices();
-            const copiedPages = await newDoc.copyPages(sourcePdfDoc, pageIndices);
-            copiedPages.forEach(p => newDoc.addPage(p));
-            return await newDoc.save({ useObjectStreams: false });
-        }
-
-        // ==========================================
         // ★ ファイル名を尋ねるカスタムダイアログ機能
         // ==========================================
         function askFileName(defaultName) {
@@ -1137,7 +1125,7 @@
         }
 
         // ----------------------------------------------------
-        // ★ 結合実行
+        // ★ 結合実行（ファイル肥大化を完全に防ぐ究極ロジック版）
         // ----------------------------------------------------
         btnProcessMerge.addEventListener('click', async () => {
             if (mergeFiles.length < 2) {
@@ -1148,9 +1136,9 @@
             const mode = document.querySelector('input[name="merge-mode"]:checked').value;
             const defaultBaseName = mergeFiles[0].fileName.replace(/\.[^/.]+$/, "") + (mode === 'single' ? "_結合" : "_結合分割");
             
-            // ★ ファイル名を尋ねるダイアログを表示
+            // ファイル名を尋ねるダイアログを表示
             const baseFileName = await askFileName(defaultBaseName);
-            if (!baseFileName) return; // キャンセルされた場合は処理を中止
+            if (!baseFileName) return; 
 
             showLoading();
 
@@ -1167,26 +1155,37 @@
                 if (mode === 'single') {
                     const mergedPdf = await PDFLib.PDFDocument.create();
                     
-                    let i = 0;
-                    while (i < mergeFiles.length) {
-                        const currentFileId = mergeFiles[i].fileId;
-                        const pdfDoc = loadedPdfsForMerge[currentFileId];
-                        const indicesToCopy = [];
-                        
-                        let j = i;
-                        while (j < mergeFiles.length && mergeFiles[j].fileId === currentFileId) {
-                            indicesToCopy.push(mergeFiles[j].pageIndex);
-                            j++;
+                    // 【究極の肥大化防止ロジック】
+                    // 各元のPDFファイルから、必要なページだけを「1回だけ」まとめて抽出する
+                    const pagesToCopyByFileId = {};
+                    mergeFiles.forEach(item => {
+                        if (!pagesToCopyByFileId[item.fileId]) {
+                            pagesToCopyByFileId[item.fileId] = new Set();
                         }
+                        pagesToCopyByFileId[item.fileId].add(item.pageIndex);
+                    });
+
+                    const copiedPagesMap = {}; 
+                    
+                    for (let fileId in pagesToCopyByFileId) {
+                        const pdfDoc = loadedPdfsForMerge[fileId];
+                        const uniqueIndices = Array.from(pagesToCopyByFileId[fileId]).sort((a,b) => a - b);
                         
-                        const copiedPages = await mergedPdf.copyPages(pdfDoc, indicesToCopy);
-                        copiedPages.forEach(p => mergedPdf.addPage(p));
-                        i = j;
+                        const copiedPages = await mergedPdf.copyPages(pdfDoc, uniqueIndices);
+                        
+                        uniqueIndices.forEach((originalIndex, i) => {
+                            copiedPagesMap[`${fileId}_${originalIndex}`] = copiedPages[i];
+                        });
+                    }
+
+                    // 抽出したページを、画面上で整理した順番通りに並べる
+                    for (let item of mergeFiles) {
+                        const page = copiedPagesMap[`${item.fileId}_${item.pageIndex}`];
+                        mergedPdf.addPage(page);
                     }
                     
                     const mergedPdfBytes = await mergedPdf.save();
                     const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
-                    // 入力したファイル名で保存
                     const success = await downloadSingleFile(blob, `${baseFileName}.pdf`);
                     if (success) showToast('保存が完了しました', 'success');
                     
@@ -1204,21 +1203,33 @@
                         while (endIndex < mergeFiles.length) {
                             const testDoc = await PDFLib.PDFDocument.create();
                             
-                            let i = startIndex;
-                            while (i <= endIndex) {
-                                const currentFileId = mergeFiles[i].fileId;
-                                const pdfDoc = loadedPdfsForMerge[currentFileId];
-                                const indicesToCopy = [];
-                                
-                                let j = i;
-                                while (j <= endIndex && mergeFiles[j].fileId === currentFileId) {
-                                    indicesToCopy.push(mergeFiles[j].pageIndex);
-                                    j++;
+                            // 同様に、分割するブロック内でも「1ファイルにつき1回の抽出」を行う
+                            const pagesToCopyByFileId = {};
+                            for (let i = startIndex; i <= endIndex; i++) {
+                                const item = mergeFiles[i];
+                                if (!pagesToCopyByFileId[item.fileId]) {
+                                    pagesToCopyByFileId[item.fileId] = new Set();
                                 }
+                                pagesToCopyByFileId[item.fileId].add(item.pageIndex);
+                            }
+
+                            const copiedPagesMap = {}; 
+                            
+                            for (let fileId in pagesToCopyByFileId) {
+                                const pdfDoc = loadedPdfsForMerge[fileId];
+                                const uniqueIndices = Array.from(pagesToCopyByFileId[fileId]).sort((a,b) => a - b);
                                 
-                                const copiedPages = await testDoc.copyPages(pdfDoc, indicesToCopy);
-                                copiedPages.forEach(p => testDoc.addPage(p));
-                                i = j;
+                                const copiedPages = await testDoc.copyPages(pdfDoc, uniqueIndices);
+                                
+                                uniqueIndices.forEach((originalIndex, idx) => {
+                                    copiedPagesMap[`${fileId}_${originalIndex}`] = copiedPages[idx];
+                                });
+                            }
+
+                            for (let i = startIndex; i <= endIndex; i++) {
+                                const item = mergeFiles[i];
+                                const page = copiedPagesMap[`${item.fileId}_${item.pageIndex}`];
+                                testDoc.addPage(page);
                             }
                             
                             const testBytes = await testDoc.save();
@@ -1237,7 +1248,6 @@
                         }
 
                         const actualEndIndex = endIndex - 1;
-                        // 入力したファイル名＋連番で保存
                         filesToDownload.push({ name: `${baseFileName}_part${partNum}.pdf`, data: lastValidBytes });
                         partNum++;
                         startIndex = endIndex;
