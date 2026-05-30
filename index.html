@@ -280,7 +280,7 @@
 
     <script>
         // --- Global State ---
-        let currentMode = 'split'; 
+        let currentMode = 'split'; // 'split' or 'merge'
 
         // Split State
         let currentFile = null;
@@ -448,7 +448,7 @@
                         const newDoc = await PDFLib.PDFDocument.create();
                         const [copiedPage] = await newDoc.copyPages(srcDoc, [i]);
                         newDoc.addPage(copiedPage);
-                        const newPdfBytes = await newDoc.save();
+                        const newPdfBytes = await optimizePdfSize(newDoc);
                         const pageNum = String(i + 1).padStart(String(totalPages).length, '0');
                         filesToDownload.push({ name: `${originalName}_page_${pageNum}.pdf`, data: newPdfBytes });
                     }
@@ -478,7 +478,8 @@
                                 const endPage = currentPartIndices[currentPartIndices.length - 1] + 1;
                                 const fileNameInfo = startPage === endPage ? `${startPage}` : `${startPage}-${endPage}`;
                                 
-                                filesToDownload.push({ name: `${originalName}_part${partNum}_(${fileNameInfo}).pdf`, data: await partDoc.save() });
+                                const optimizedBytes = await optimizePdfSize(partDoc);
+                                filesToDownload.push({ name: `${originalName}_part${partNum}_(${fileNameInfo}).pdf`, data: optimizedBytes });
                                 partNum++;
                                 currentPartIndices = [];
                             }
@@ -505,7 +506,8 @@
                             const indices = Array.from({length: endIndex - startIndex + 1}, (_, idx) => startIndex + idx);
                             const copiedPages = await testDoc.copyPages(srcDoc, indices);
                             copiedPages.forEach(p => testDoc.addPage(p));
-                            const testBytes = await testDoc.save();
+                            
+                            const testBytes = await optimizePdfSize(testDoc);
 
                             if (testBytes.length <= MAX_BYTES) {
                                 lastValidBytes = testBytes;
@@ -706,7 +708,6 @@
             if (mergeFiles.length === 0) return;
             showLoading();
             try {
-                // 1. 各ページのテキストを解析して、書類の種類と名前を特定する
                 for (let item of mergeFiles) {
                     if (!item.docType) {
                         const pdfDoc = pdfjsLoadedDocs[item.fileId];
@@ -714,8 +715,8 @@
                         
                         const page = await pdfDoc.getPage(item.pageNumber);
                         const textContent = await page.getTextContent();
+                        
                         const rawText = textContent.items.map(t => t.str).join(''); 
-                        // 空白を全て除去して判定しやすくする
                         const fullText = rawText.replace(/\s/g, ''); 
                         item.fullText = fullText;
                         
@@ -723,11 +724,6 @@
                             item.docType = 'cover';
                         } else if (fullText.includes('モニタリング表') || fullText.includes('モニタリング結果')) {
                             item.docType = 'monitoring';
-                            // 空白がない状態でのマッチング
-                            const match = fullText.match(/利用者名(.*?)様/);
-                            if (match && match[1] && match[1].length < 15) {
-                                item.userName = match[1]; 
-                            }
                         } else if (fullText.includes('サービス提供票') || fullText.includes('提供票')) {
                             item.docType = 'record';
                         } else {
@@ -736,46 +732,62 @@
                     }
                 }
                 
-                let userNames = [];
+                const fullNames = [];
                 for (let item of mergeFiles) {
-                    if (item.userName && !userNames.includes(item.userName)) {
-                        userNames.push(item.userName);
-                    }
-                }
-                
-                // 2. 実績ファイルなどのファイル名から、名前を推測して紐づける
-                for (let item of mergeFiles) {
-                    if (item.docType === 'record' || item.docType === 'unknown') {
-                        const fileNameBase = item.fileName.replace(/\.[^/.]+$/, "").replace(/\s/g, '');
-                        if (fileNameBase.length > 0 && fileNameBase !== 'm' && !fileNameBase.includes('モニタ') && !fileNameBase.includes('送付')) {
-                             if (!item.userName) item.userName = fileNameBase;
-                             if (!userNames.includes(fileNameBase)) userNames.push(fileNameBase);
-                        }
-                    }
-                }
-
-                // 3. テキストから名前が含まれているか相互チェック（モニタリングの抽出漏れ対策）
-                for (let item of mergeFiles) {
-                    if (!item.userName && item.fullText) {
-                        const sortedNames = [...userNames].sort((a, b) => b.length - a.length);
-                        for (let name of sortedNames) {
-                            if (item.fullText.includes(name)) {
-                                item.userName = name;
-                                break;
+                    if (item.docType === 'monitoring' && !item.userName) {
+                        const match = item.fullText.match(/利用者名(.*?)様/);
+                        if (match && match[1] && match[1].length < 15) {
+                            const name = match[1];
+                            item.userName = name;
+                            if (!fullNames.includes(name)) {
+                                fullNames.push(name);
                             }
                         }
                     }
                 }
 
-                // 4. 【強化ロジック】実績ファイル（複数ページ）の場合、名前をファイル内で共有する
+                for (let item of mergeFiles) {
+                    if ((item.docType === 'record' || item.docType === 'unknown') && !item.userName) {
+                        let foundName = null;
+                        for (let name of fullNames) {
+                            if (item.fullText.includes(name)) {
+                                foundName = name;
+                                break;
+                            }
+                        }
+
+                        if (!foundName) {
+                            const fileNameBase = item.fileName.replace(/\.[^/.]+$/, "").replace(/\s/g, '');
+                            if (fileNameBase.length > 0 && fileNameBase !== 'm' && !fileNameBase.includes('モニタ') && !fileNameBase.includes('送付')) {
+                                for (let name of fullNames) {
+                                    if (name.startsWith(fileNameBase)) {
+                                        foundName = name;
+                                        break;
+                                    }
+                                }
+                                if (!foundName) {
+                                    foundName = fileNameBase;
+                                    if (!fullNames.includes(fileNameBase)) fullNames.push(fileNameBase);
+                                }
+                            }
+                        }
+
+                        if (foundName) {
+                            item.userName = foundName;
+                        }
+                    }
+                }
+
                 const fileIdToName = {};
                 const fileIdToDocType = {};
+                
                 for (let item of mergeFiles) {
                     if (item.docType !== 'monitoring' && item.docType !== 'cover') {
                         if (item.userName) fileIdToName[item.fileId] = item.userName;
                         if (item.docType === 'record') fileIdToDocType[item.fileId] = 'record';
                     }
                 }
+                
                 for (let item of mergeFiles) {
                     if (item.docType !== 'monitoring' && item.docType !== 'cover') {
                         if (!item.userName && fileIdToName[item.fileId]) {
@@ -787,24 +799,6 @@
                     }
                 }
 
-                // 5. 【名寄せロジック】 「阿部」と「阿部麗子」が別々に認識されるのを防ぎ、統一する
-                const uniqueNames = [...new Set(mergeFiles.map(i => i.userName).filter(Boolean))];
-                const nameMapping = {};
-                for (let i = 0; i < uniqueNames.length; i++) {
-                    for (let j = 0; j < uniqueNames.length; j++) {
-                        if (i !== j && uniqueNames[i].includes(uniqueNames[j])) {
-                            // 例: "阿部麗子" は "阿部" を含む -> "阿部麗子" を "阿部" に統一する
-                            nameMapping[uniqueNames[i]] = uniqueNames[j];
-                        }
-                    }
-                }
-                for (let item of mergeFiles) {
-                    if (item.userName && nameMapping[item.userName]) {
-                        item.userName = nameMapping[item.userName];
-                    }
-                }
-
-                // 6. 並べ替え処理の準備
                 const covers = mergeFiles.filter(i => i.docType === 'cover');
                 const unknowns = mergeFiles.filter(i => i.docType === 'unknown' || (i.docType !== 'cover' && !i.userName));
                 
@@ -817,10 +811,8 @@
                     }
                 }
 
-                // 苗字でソート (ひらがな・漢字のコード順)
                 const sortedNames = Object.keys(userGroups).sort((a, b) => a.localeCompare(b, 'ja'));
 
-                // 7. 結合順序の配列を作成
                 const sortedFiles = [];
                 
                 covers.sort((a,b) => (a.fileId === b.fileId) ? a.pageIndex - b.pageIndex : 0);
@@ -840,7 +832,6 @@
                 unknowns.sort((a,b) => (a.fileId === b.fileId) ? a.pageIndex - b.pageIndex : 0);
                 sortedFiles.push(...unknowns);
 
-                // 8. 結果を反映
                 mergeFiles = sortedFiles;
                 renderMergeThumbnails();
                 showToast('スマート整理が完了しました', 'success');
@@ -1071,6 +1062,19 @@
             });
         }
 
+        // ==========================================
+        // ★ 新機能：ファイルサイズの最適化関数
+        // ==========================================
+        async function optimizePdfSize(sourcePdfDoc) {
+            // 新しい空のドキュメントを作成し、そこにコピーすることで不要なメタデータや重複リソースを削ぎ落とす
+            const newDoc = await PDFLib.PDFDocument.create();
+            const pageIndices = sourcePdfDoc.getPageIndices();
+            const copiedPages = await newDoc.copyPages(sourcePdfDoc, pageIndices);
+            copiedPages.forEach(p => newDoc.addPage(p));
+            // 保存時のオプションを設定（デフォルトのままでも十分最適化されることが多い）
+            return await newDoc.save({ useObjectStreams: false });
+        }
+
         btnProcessMerge.addEventListener('click', async () => {
             if (mergeFiles.length < 2) {
                 showToast('結合するには2ページ以上必要です。', 'error');
@@ -1098,8 +1102,9 @@
                         mergedPdf.addPage(copiedPage);
                     }
                     
-                    const mergedPdfBytes = await mergedPdf.save();
-                    const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
+                    // ★ 結合後に最適化処理を通す
+                    const optimizedBytes = await optimizePdfSize(mergedPdf);
+                    const blob = new Blob([optimizedBytes], { type: 'application/pdf' });
                     const success = await downloadSingleFile(blob, `${baseName}_merged.pdf`);
                     if (success) showToast('保存が完了しました', 'success');
                     
@@ -1122,7 +1127,9 @@
                                 const [copiedPage] = await testDoc.copyPages(pdfDoc, [item.pageIndex]);
                                 testDoc.addPage(copiedPage);
                             }
-                            const testBytes = await testDoc.save();
+                            
+                            // ★ 1MB判定時にも最適化後のサイズでチェックする
+                            const testBytes = await optimizePdfSize(testDoc);
 
                             if (testBytes.length <= MAX_BYTES) {
                                 lastValidBytes = testBytes;
