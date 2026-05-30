@@ -268,6 +268,19 @@
         </div>
     </main>
 
+    <!-- File Name Input Modal -->
+    <div id="filename-modal" class="fixed inset-0 bg-black bg-opacity-50 z-50 hidden flex-col items-center justify-center">
+        <div class="bg-white rounded-lg p-6 w-96 max-w-[90%] shadow-xl transform transition-all">
+            <h3 class="text-lg font-bold mb-2 text-gray-800">保存するファイル名</h3>
+            <p class="text-sm text-gray-500 mb-4">複数ファイルが出力される場合は、この名前の後に連番等が付与されます。</p>
+            <input type="text" id="filename-input" class="w-full border border-gray-300 rounded p-3 mb-5 focus:outline-none focus:border-black focus:ring-1 focus:ring-black" autocomplete="off" spellcheck="false" />
+            <div class="flex justify-end gap-3">
+                <button id="filename-cancel" class="px-5 py-2 border border-gray-300 text-gray-700 rounded hover:bg-gray-50 transition-colors">キャンセル</button>
+                <button id="filename-ok" class="px-5 py-2 bg-black text-white rounded hover:bg-gray-800 transition-colors">決定</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Full Screen Loading Overlay -->
     <div id="loading-overlay" class="fixed inset-0 bg-white bg-opacity-90 z-40 hidden flex-col items-center justify-center">
         <div class="loader mb-4"></div>
@@ -436,6 +449,11 @@
         async function processSplitPDF() {
             if (!currentFile) return;
             const mode = document.querySelector('input[name="split-mode"]:checked').value;
+            
+            // ★ ファイル名を尋ねるダイアログを表示
+            const baseFileName = await askFileName(originalName);
+            if (!baseFileName) return; // キャンセルされた場合は処理を中止
+
             showLoading();
 
             try {
@@ -448,9 +466,9 @@
                         const newDoc = await PDFLib.PDFDocument.create();
                         const [copiedPage] = await newDoc.copyPages(srcDoc, [i]);
                         newDoc.addPage(copiedPage);
-                        const newPdfBytes = await newDoc.save();
+                        const newPdfBytes = await optimizePdfSize(newDoc);
                         const pageNum = String(i + 1).padStart(String(totalPages).length, '0');
-                        filesToDownload.push({ name: `${originalName}_page_${pageNum}.pdf`, data: newPdfBytes });
+                        filesToDownload.push({ name: `${baseFileName}_page_${pageNum}.pdf`, data: newPdfBytes });
                     }
                 } else if (mode === 'visual') {
                     const cutBtns = document.querySelectorAll('.cut-btn.active');
@@ -478,7 +496,8 @@
                                 const endPage = currentPartIndices[currentPartIndices.length - 1] + 1;
                                 const fileNameInfo = startPage === endPage ? `${startPage}` : `${startPage}-${endPage}`;
                                 
-                                filesToDownload.push({ name: `${originalName}_part${partNum}_(${fileNameInfo}).pdf`, data: await partDoc.save() });
+                                const optimizedBytes = await optimizePdfSize(partDoc);
+                                filesToDownload.push({ name: `${baseFileName}_part${partNum}_(${fileNameInfo}).pdf`, data: optimizedBytes });
                                 partNum++;
                                 currentPartIndices = [];
                             }
@@ -506,7 +525,7 @@
                             const copiedPages = await testDoc.copyPages(srcDoc, indices);
                             copiedPages.forEach(p => testDoc.addPage(p));
                             
-                            const testBytes = await testDoc.save();
+                            const testBytes = await optimizePdfSize(testDoc);
 
                             if (testBytes.length <= MAX_BYTES) {
                                 lastValidBytes = testBytes;
@@ -522,7 +541,7 @@
                         }
 
                         const actualEndIndex = endIndex - 1;
-                        filesToDownload.push({ name: `${originalName}_part${partNum}_(${startIndex + 1}-${actualEndIndex + 1}).pdf`, data: lastValidBytes });
+                        filesToDownload.push({ name: `${baseFileName}_part${partNum}_(${startIndex + 1}-${actualEndIndex + 1}).pdf`, data: lastValidBytes });
                         partNum++;
                         startIndex = endIndex;
                     }
@@ -1061,17 +1080,81 @@
             });
         }
 
+        // ==========================================
+        // ★ ファイルサイズの最適化関数
+        // ==========================================
+        async function optimizePdfSize(sourcePdfDoc) {
+            const newDoc = await PDFLib.PDFDocument.create();
+            const pageIndices = sourcePdfDoc.getPageIndices();
+            const copiedPages = await newDoc.copyPages(sourcePdfDoc, pageIndices);
+            copiedPages.forEach(p => newDoc.addPage(p));
+            return await newDoc.save({ useObjectStreams: false });
+        }
+
+        // ==========================================
+        // ★ ファイル名を尋ねるカスタムダイアログ機能
+        // ==========================================
+        function askFileName(defaultName) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('filename-modal');
+                const input = document.getElementById('filename-input');
+                const btnOk = document.getElementById('filename-ok');
+                const btnCancel = document.getElementById('filename-cancel');
+
+                input.value = defaultName;
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+                input.focus();
+                input.select();
+
+                const cleanup = () => {
+                    modal.classList.add('hidden');
+                    modal.classList.remove('flex');
+                    btnOk.removeEventListener('click', onOk);
+                    btnCancel.removeEventListener('click', onCancel);
+                    input.removeEventListener('keydown', onKey);
+                };
+
+                const onOk = () => {
+                    cleanup();
+                    resolve(input.value.trim() || defaultName);
+                };
+
+                const onCancel = () => {
+                    cleanup();
+                    resolve(null); // キャンセル時はnullを返す
+                };
+
+                const onKey = (e) => {
+                    if (e.key === 'Enter') onOk();
+                    if (e.key === 'Escape') onCancel();
+                };
+
+                btnOk.addEventListener('click', onOk);
+                btnCancel.addEventListener('click', onCancel);
+                input.addEventListener('keydown', onKey);
+            });
+        }
+
         // ----------------------------------------------------
-        // ★ 結合実行（ファイル肥大化防止のチャンク処理版）
+        // ★ 結合実行
         // ----------------------------------------------------
         btnProcessMerge.addEventListener('click', async () => {
             if (mergeFiles.length < 2) {
                 showToast('結合するには2ページ以上必要です。', 'error');
                 return;
             }
+
+            const mode = document.querySelector('input[name="merge-mode"]:checked').value;
+            const defaultBaseName = mergeFiles[0].fileName.replace(/\.[^/.]+$/, "") + (mode === 'single' ? "_結合" : "_結合分割");
+            
+            // ★ ファイル名を尋ねるダイアログを表示
+            const baseFileName = await askFileName(defaultBaseName);
+            if (!baseFileName) return; // キャンセルされた場合は処理を中止
+
             showLoading();
+
             try {
-                const mode = document.querySelector('input[name="merge-mode"]:checked').value;
                 const loadedPdfsForMerge = {}; 
 
                 for (let item of mergeFiles) {
@@ -1081,12 +1164,9 @@
                     }
                 }
                 
-                const baseName = mergeFiles[0].fileName.replace(/\.[^/.]+$/, "");
-
                 if (mode === 'single') {
                     const mergedPdf = await PDFLib.PDFDocument.create();
                     
-                    // 同じファイルから連続してページを追加する場合は、まとめてコピーしてリソースの重複を防ぐ（チャンク処理）
                     let i = 0;
                     while (i < mergeFiles.length) {
                         const currentFileId = mergeFiles[i].fileId;
@@ -1106,7 +1186,8 @@
                     
                     const mergedPdfBytes = await mergedPdf.save();
                     const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
-                    const success = await downloadSingleFile(blob, `${baseName}_merged.pdf`);
+                    // 入力したファイル名で保存
+                    const success = await downloadSingleFile(blob, `${baseFileName}.pdf`);
                     if (success) showToast('保存が完了しました', 'success');
                     
                 } else if (mode === 'size') {
@@ -1123,7 +1204,6 @@
                         while (endIndex < mergeFiles.length) {
                             const testDoc = await PDFLib.PDFDocument.create();
                             
-                            // チャンク処理で一括コピー
                             let i = startIndex;
                             while (i <= endIndex) {
                                 const currentFileId = mergeFiles[i].fileId;
@@ -1157,7 +1237,8 @@
                         }
 
                         const actualEndIndex = endIndex - 1;
-                        filesToDownload.push({ name: `${baseName}_merged_part${partNum}.pdf`, data: lastValidBytes });
+                        // 入力したファイル名＋連番で保存
+                        filesToDownload.push({ name: `${baseFileName}_part${partNum}.pdf`, data: lastValidBytes });
                         partNum++;
                         startIndex = endIndex;
                     }
